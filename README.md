@@ -1,6 +1,6 @@
 # Fraternity Interview Scheduler
 
-Randomly groups PNMs into groups of exactly 4 for 20-minute group interviews,
+Randomly groups PNMs into groups for 20-minute group interviews,
 using only the availability they submitted. Outputs an Excel file with the
 groups, their interview times, and five blank Brother columns for you to fill
 in by hand.
