@@ -21,6 +21,7 @@ Requires: openpyxl  (pip install -r requirements.txt)
 
 import argparse
 import csv
+import io
 import os
 import random
 import re
@@ -36,8 +37,8 @@ sys.setrecursionlimit(10000)
 # Anything you enter at the prompts when running the program overrides these.
 
 # --- Group and timing rules -------------------------------------------------
-GROUP_SIZE = 4            # PNMs per interview group. Exactly this many, always.
-INTERVIEW_DURATION = 20   # Minutes per interview.
+GROUP_SIZE = 5            # PNMs per interview group. Exactly this many, always.
+INTERVIEW_DURATION = 30   # Minutes per interview.
 MAX_GROUPS_PER_SLOT = 1   # How many groups may interview at the same time
                           # (i.e. how many interview rooms you have).
 MAX_ATTEMPTS = 10000      # How many random shuffles to try before giving up.
@@ -49,23 +50,22 @@ NAME_COLUMN = "Name"
 AVAILABILITY_COLUMN = "Interview Availability"
 
 # --- The interview slots ----------------------------------------------------
-# One entry per 20-minute interview slot, listed in chronological order.
+# One entry per 30-minute interview slot, listed in chronological order.
 # These strings must match the checkbox options in your Google Form.
 # Each entry is the START of a slot; the end time is computed automatically
 # using INTERVIEW_DURATION.
 INTERVIEW_SLOTS = [
+    "Monday 4:30 PM",
+    "Monday 5:00 PM",
+    "Monday 5:30 PM",
     "Monday 6:00 PM",
-    "Monday 6:20 PM",
-    "Monday 6:40 PM",
-    "Monday 7:00 PM",
-    "Monday 7:20 PM",
-    "Monday 7:40 PM",
+    "Monday 6:30 PM",
+    "Tuesday 5:00 PM",
+    "Tuesday 5:30 PM",
     "Tuesday 6:00 PM",
-    "Tuesday 6:20 PM",
-    "Tuesday 6:40 PM",
+    "Tuesday 6:30 PM",
     "Tuesday 7:00 PM",
-    "Tuesday 7:20 PM",
-    "Tuesday 7:40 PM",
+    "Tuesday 7:30 PM",
 ]
 
 # --- Default filenames shown at the prompts ---------------------------------
@@ -248,10 +248,22 @@ def split_availability(cell):
     return [part.strip() for part in cell.split(",") if part.strip()]
 
 
+LOOKS_LIKE_TIME = re.compile(r"\d{1,2}\s*[:.]\s*\d{2}|\d{1,2}\s*[AaPp]\.?\s*[Mm]")
+
+
 def match_availability(tokens, slot_lookup):
-    """Turn raw answers into slot indexes. Returns (indexes, unrecognized)."""
+    """
+    Turn raw answers into slot indexes.
+
+    Returns (indexes, unrecognized, comments). An answer that contains a clock
+    time but matches no configured slot is 'unrecognized' and is an error worth
+    stopping for. An answer with no time in it at all - "Strongly prefer
+    Monday.", "I can't do Monday." - is just a note the PNM typed, so it is
+    reported as a comment and otherwise ignored.
+    """
     indexes = []
     unrecognized = []
+    comments = []
 
     i = 0
     while i < len(tokens):
@@ -269,42 +281,146 @@ def match_availability(tokens, slot_lookup):
                 continue
 
         if index is None:
-            unrecognized.append(token)
+            if LOOKS_LIKE_TIME.search(token):
+                unrecognized.append(token)
+            else:
+                comments.append(token)
         else:
             indexes.append(index)
         i += 1
 
-    return sorted(set(indexes)), unrecognized
+    return sorted(set(indexes)), unrecognized, comments
+
+
+def _cell_to_text(value):
+    """Turn any spreadsheet cell into the text the rest of the program expects."""
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%m/%d/%Y %I:%M %p")
+    if isinstance(value, float) and value == int(value):
+        return str(int(value))
+    return str(value)
+
+
+def read_excel_table(path):
+    """Read the first worksheet of an .xlsx/.xlsm file into CSV-style rows."""
+    try:
+        from openpyxl import load_workbook
+    except ImportError:
+        raise SchedulerError(
+            "Reading Excel files requires the 'openpyxl' library.\n\n"
+            "Install it by running:\n\n    pip install -r requirements.txt"
+        )
+
+    try:
+        # Read the bytes ourselves so a spreadsheet saved under a .csv name
+        # still opens: openpyxl otherwise refuses based on the extension alone.
+        with open(path, "rb") as handle:
+            buffer = io.BytesIO(handle.read())
+        workbook = load_workbook(buffer, data_only=True, read_only=True)
+    except SchedulerError:
+        raise
+    except Exception as exc:
+        raise SchedulerError(
+            "Could not open the Excel file:\n    {}\n\n{}\n\n"
+            "If the file is open in Excel right now, close it and try again. If it "
+            "is\nan older .xls file, open it in Excel and use File > Save As to save "
+            "it as\n.xlsx or .csv.".format(os.path.abspath(path), exc)
+        )
+
+    sheet = workbook.active
+    grid = [
+        [_cell_to_text(cell) for cell in row]
+        for row in sheet.iter_rows(values_only=True)
+    ]
+    workbook.close()
+
+    # The header is the first row that actually has text in it.
+    header_index = None
+    for index, row in enumerate(grid):
+        if any(cell.strip() for cell in row):
+            header_index = index
+            break
+    if header_index is None:
+        return [], []
+
+    fieldnames = [cell.strip() for cell in grid[header_index]]
+    while fieldnames and not fieldnames[-1]:
+        fieldnames.pop()
+
+    rows = []
+    for row in grid[header_index + 1:]:
+        record = {}
+        for position, field in enumerate(fieldnames):
+            record[field] = row[position].strip() if position < len(row) else ""
+        rows.append(record)
+    return fieldnames, rows
+
+
+def read_csv_table(path):
+    try:
+        with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            return reader.fieldnames, list(reader)
+    except UnicodeDecodeError:
+        with open(path, "r", encoding="latin-1", newline="") as handle:
+            reader = csv.DictReader(handle)
+            return reader.fieldnames, list(reader)
+
+
+def read_table(path):
+    """Read a CSV or Excel file of form responses, whichever the user supplied."""
+    extension = os.path.splitext(path)[1].lower()
+
+    if extension in (".xlsx", ".xlsm"):
+        return read_excel_table(path)
+
+    if extension == ".xls":
+        raise SchedulerError(
+            "'{}' is an old-format Excel file (.xls), which this program cannot "
+            "read.\n\nOpen it in Excel and use File > Save As to save it as .xlsx "
+            "or .csv,\nthen run the program again.".format(os.path.basename(path))
+        )
+
+    # Not an Excel extension, but check for an Excel file wearing a .csv name:
+    # every .xlsx is really a ZIP archive and starts with the bytes "PK".
+    try:
+        with open(path, "rb") as handle:
+            signature = handle.read(2)
+    except OSError as exc:
+        raise SchedulerError("Could not open the file:\n    {}".format(exc))
+
+    if signature == b"PK":
+        return read_excel_table(path)
+
+    return read_csv_table(path)
 
 
 def load_pnms(csv_path, name_column, availability_column, slots):
     if not os.path.isfile(csv_path):
         raise SchedulerError(
-            "Could not find the CSV file:\n    {}\n\n"
-            "Check that the file name is spelled correctly and that the file is\n"
-            "in the same folder as scheduler.py (or give the full path to it).".format(
+            "Could not find the file:\n    {}\n\n"
+            "Check that the file name is spelled correctly (including the .csv or\n"
+            ".xlsx on the end) and that the file is in the same folder as "
+            "scheduler.py\n(or give the full path to it).".format(
                 os.path.abspath(csv_path)
             )
         )
 
     try:
-        with open(csv_path, "r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle)
-            fieldnames = reader.fieldnames
-            rows = list(reader)
-    except UnicodeDecodeError:
-        with open(csv_path, "r", encoding="latin-1", newline="") as handle:
-            reader = csv.DictReader(handle)
-            fieldnames = reader.fieldnames
-            rows = list(reader)
+        fieldnames, rows = read_table(csv_path)
+    except SchedulerError:
+        raise
     except OSError as exc:
-        raise SchedulerError("Could not open the CSV file:\n    {}".format(exc))
+        raise SchedulerError("Could not open the file:\n    {}".format(exc))
 
     if not fieldnames:
         raise SchedulerError(
-            "The CSV file appears to be empty or is not a valid CSV file:\n    {}\n\n"
-            "Export the responses from Google Forms again "
-            "(File > Download > Comma Separated Values).".format(csv_path)
+            "This file appears to be empty, or is not a spreadsheet this program "
+            "can\nread:\n    {}\n\n"
+            "It accepts .csv files (File > Download > Comma Separated Values in "
+            "Google\nForms) and .xlsx files.".format(csv_path)
         )
 
     name_field = find_column(fieldnames, name_column, "PNM name")
@@ -325,6 +441,7 @@ def load_pnms(csv_path, name_column, availability_column, slots):
     empty_name_rows = []
     no_availability = []
     bad_values = []
+    notes = []
     seen_names = {}
     duplicates = []
 
@@ -345,10 +462,12 @@ def load_pnms(csv_path, name_column, availability_column, slots):
         seen_names[key] = row_number
 
         tokens = split_availability(raw)
-        indexes, unrecognized = match_availability(tokens, slot_lookup)
+        indexes, unrecognized, comments = match_availability(tokens, slot_lookup)
 
         for value in unrecognized:
             bad_values.append((name, value))
+        for value in comments:
+            notes.append((name, value))
         if not indexes and not unrecognized:
             no_availability.append(name)
 
@@ -400,9 +519,19 @@ def load_pnms(csv_path, name_column, availability_column, slots):
             )
         )
 
+    if notes:
+        print("Note: {} answer(s) were free text rather than an interview time.".format(
+            len(notes)))
+        print("They were ignored for scheduling. Read them yourself if they matter:")
+        for name, value in notes[:10]:
+            print("    {}: \"{}\"".format(name, value))
+        if len(notes) > 10:
+            print("    ...and {} more".format(len(notes) - 10))
+        print("")
+
     if problems:
         raise SchedulerError(
-            "The CSV file has {} problem(s) that must be fixed:\n\n{}".format(
+            "The file has {} problem(s) that must be fixed:\n\n{}".format(
                 len(problems),
                 "\n\n".join(
                     "{}. {}".format(i, text) for i, text in enumerate(problems, 1)
@@ -981,12 +1110,30 @@ def run(args):
 
     csv_path = args.csv
     if csv_path is None:
+        nearby = sorted(
+            f for f in os.listdir(".")
+            if f.lower().endswith((".csv", ".xlsx", ".xlsm"))
+            and not f.startswith("~$")
+        )
+        default_file = DEFAULT_CSV if os.path.isfile(DEFAULT_CSV) else None
+        if nearby:
+            print("\nResponse files found in this folder:")
+            for filename in nearby[:12]:
+                print("    - {}".format(filename))
+            if len(nearby) > 12:
+                print("    ...and {} more".format(len(nearby) - 12))
+
         while True:
-            csv_path = ask("Enter CSV filename", DEFAULT_CSV)
+            csv_path = ask("Enter CSV or Excel filename", default_file)
+            if not csv_path:
+                print("\n  Please type the name of your responses file "
+                      "(.csv or .xlsx).")
+                continue
             if os.path.isfile(csv_path):
                 break
             print("\n  There is no file named '{}' in this folder.".format(csv_path))
-            print("  Check the spelling, or paste the full path to the file.")
+            print("  Check the spelling, including the .csv or .xlsx on the end,")
+            print("  or paste the full path to the file.")
 
     output_path = args.output or (
         ask("Enter output filename", DEFAULT_OUTPUT) if interactive
