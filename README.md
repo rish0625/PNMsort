@@ -1,6 +1,6 @@
 # Fraternity Interview Scheduler
 
-Randomly groups PNMs into groups for 20-minute group interviews,
+Randomly groups PNMs into groups of exactly 4 for 20-minute group interviews,
 using only the availability they submitted. Outputs an Excel file with the
 groups, their interview times, and five blank Brother columns for you to fill
 in by hand.
@@ -29,7 +29,7 @@ If `pip` isn't found, try `python -m pip install -r requirements.txt` or
 
 ## 2. Running the program
 
-Put the CSV exported from Google Forms in the same folder, then run:
+Put your responses file in the same folder, then run:
 
 ```
 python scheduler.py
@@ -42,7 +42,10 @@ It asks six questions. Pressing Enter accepts the default shown in brackets:
 FRATERNITY INTERVIEW SCHEDULER
 ========================================
 
-Enter CSV filename [PNM_Availability.csv]:
+Response files found in this folder:
+    - PNM_Availability.csv
+
+Enter CSV or Excel filename [PNM_Availability.csv]:
 > 
 Enter output filename [Interview_Schedule.xlsx]:
 > 
@@ -80,6 +83,39 @@ You can also skip the prompts entirely:
 ```
 python scheduler.py --csv PNM_Availability.csv --output Schedule.xlsx --seed 847293
 ```
+
+### Input file formats
+
+It accepts a `.csv` exported from Google Forms and also reads `.xlsx` /
+`.xlsm` workbooks directly, so a sheet you built by hand works without
+converting it first. It reads the first worksheet, treats the first non-empty
+row as the header, and finds your name and availability columns by name. A
+spreadsheet accidentally saved with a `.csv` extension is detected and read as
+a spreadsheet anyway. Old `.xls` files are not supported; re-save those as
+`.xlsx` or `.csv`.
+
+### Free-text answers
+
+If a Google Form has an "Other" box, or someone types a note into the
+availability question ("Strongly prefer Monday."), that answer is ignored for
+scheduling and listed on screen so you can read it yourself:
+
+```
+Note: 2 answer(s) were free text rather than an interview time.
+They were ignored for scheduling. Read them yourself if they matter:
+    Eliana Ladic: "I will not be available for an interview on Monday."
+    Saahas Yaddula: "Strongly prefer Monday."
+```
+
+An answer that *does* contain a clock time but matches no configured slot
+(`Monday 9:15 PM` when no such slot exists) is still a hard error, since that
+usually means `INTERVIEW_SLOTS` and the form have drifted apart.
+
+The program never acts on a preference typed in free text. Honoring "strongly
+prefer Monday" would mean treating one PNM differently from another on
+something other than hard availability, which is exactly what the double-blind
+design is meant to prevent. If a note reflects a real constraint, fix it at the
+source: correct that person's checkboxes in the file and re-run.
 
 ### Before your first real run
 
@@ -261,7 +297,7 @@ with the tightest availability and the slots too empty to ever host a group).
 ## Testing
 
 `run_tests.py` covers the eight scenarios plus input validation, Excel
-structure, and an end-to-end command-line run — 40 checks in total, all
+structure, and an end-to-end command-line run — 44 checks in total, all
 passing. To run them yourself:
 
 ```
@@ -279,6 +315,10 @@ python run_tests.py
 | 6. `MAX_GROUPS_PER_SLOT = 2` | 6 groups fit into 3 slots, 2 per slot, availability still respected |
 | 7. Same seed twice | Identical groups, times, and group IDs |
 | 8. No seed / different seeds | 40 different seeds produced 40 different groupings |
+
+Plus input handling: `.xlsx` read natively, a spreadsheet mislabelled `.csv`
+detected and read, free-text answers ignored without stopping, and an
+unmatched clock time still reported as an error. 44 checks in total.
 
 One extra check worth noting: across 200 runs, groups landed in all 12
 configured slots rather than clustering in the earliest ones, and with
